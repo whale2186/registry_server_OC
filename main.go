@@ -360,14 +360,14 @@ if req.PublicPort <= 0 ||
 		req.RelayID = newID("relay")
 	}
 
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-if err != nil {
-    writeJSONError(w, http.StatusBadRequest, "invalid_remote_addr")
-    return
-}
+//	host, _, err := net.SplitHostPort(r.RemoteAddr)
+//#if err != nil {
+//    writeJSONError(w, http.StatusBadRequest, "invalid_remote_addr")
+//    return
+//}
 
-	publicURL := fmt.Sprintf("%s:%d", host, req.PublicPort)
-
+	//publicURL := fmt.Sprintf("%s:%d", host, req.PublicPort)
+	publicURL := strings.TrimSpace(req.PublicURL)
 	now := time.Now().UTC().Unix()
 
 	_, err = s.db.ExecContext(r.Context(), `
