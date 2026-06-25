@@ -971,7 +971,7 @@ func registerRoomOnRelay(
 
     body, _ := json.Marshal(payload)
 
-relayAPIURL := "http://" + strings.TrimSpace(relayURL)
+relayAPIURL := "https://" + strings.TrimSpace(relayURL)
 
 resp, err := http.Post(
     relayAPIURL+"/internal/rooms/register",
