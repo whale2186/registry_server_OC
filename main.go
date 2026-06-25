@@ -45,12 +45,6 @@ import (
 const (
 	defaultHeartbeatTimeout = 60 * time.Second
 	defaultRoomMaxUsers     = 4
-	defaultRelayScore       = 80
-	maxRelayScore           = 100
-	minRelayScore           = 0
-	relayScoreSuccessDelta  = 2
-	relayScoreFailureDelta  = -15
-	relayScoreOfflineDelta  = -5
 )
 
 type Server struct {
@@ -69,8 +63,6 @@ type Relay struct {
 	CurrentUsers  int    `json:"currentUsers"`
 	MaxRooms      int    `json:"maxRooms"`
 	MaxUsers      int    `json:"maxUsers"`
-	Score         int    `json:"score"`
-	RelayType     string `json:"relayType"`
 	LastHeartbeat int64  `json:"lastHeartbeat"`
 	CreatedAt     int64  `json:"createdAt"`
 	UpdatedAt     int64  `json:"updatedAt"`
@@ -97,7 +89,6 @@ type registerRelayRequest struct {
     Region     string `json:"region"`
     MaxRooms   int    `json:"maxRooms"`
     MaxUsers   int    `json:"maxUsers"`
-    RelayType  string `json:"relayType"`
 }
 
 type heartbeatRequest struct {
@@ -106,14 +97,12 @@ type heartbeatRequest struct {
 	CurrentUsers int    `json:"currentUsers"`
 	IsOnline     *bool  `json:"isOnline,omitempty"`
 	Region       string `json:"region,omitempty"`
-	RelayType    string `json:"relayType,omitempty"`
 }
 
 type createRoomRequest struct {
     RoomID   string `json:"roomId,omitempty"`
     RelayID  string `json:"relayId,omitempty"`
     Region   string `json:"region,omitempty"`
-    RelayType string `json:"relayType,omitempty"`
     Pin      string `json:"pin,omitempty"`
     MaxUsers int    `json:"maxUsers"`
 }
@@ -171,7 +160,7 @@ func (s *Server) handleRoomCheckRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newRelay, err := s.chooseRelay(r.Context(), relay.Region, relay.RelayType)
+	newRelay, err := s.chooseRelay(r.Context(), relay.Region)
 	if err != nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "no_available_relay")
 		return
@@ -273,8 +262,6 @@ func initSchema(ctx context.Context, db *sql.DB) error {
 			current_users  INTEGER NOT NULL DEFAULT 0,
 			max_rooms      INTEGER NOT NULL DEFAULT 1000,
 			max_users      INTEGER NOT NULL DEFAULT 10000,
-			score          INTEGER NOT NULL DEFAULT 80,
-			relay_type     TEXT NOT NULL DEFAULT 'all',
 			last_heartbeat INTEGER NOT NULL,
 			created_at     INTEGER NOT NULL,
 			updated_at     INTEGER NOT NULL
@@ -301,49 +288,7 @@ func initSchema(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
-	if err := ensureRelayColumn(ctx, db, "score", "INTEGER NOT NULL DEFAULT 80"); err != nil {
-		return err
-	}
-	if err := ensureRelayColumn(ctx, db, "relay_type", "TEXT NOT NULL DEFAULT 'all'"); err != nil {
-		return err
-	}
-	for _, stmt := range []string{
-		`CREATE INDEX IF NOT EXISTS idx_relays_online_score ON relays (is_online, score, current_rooms, current_users, last_heartbeat);`,
-		`CREATE INDEX IF NOT EXISTS idx_relays_type ON relays (relay_type);`,
-	} {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return err
-		}
-	}
 	return nil
-}
-
-func ensureRelayColumn(ctx context.Context, db *sql.DB, columnName, columnDef string) error {
-	rows, err := db.QueryContext(ctx, `PRAGMA table_info(relays)`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var cid int
-		var name, columnType string
-		var notNull int
-		var defaultValue any
-		var pk int
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			return err
-		}
-		if name == columnName {
-			return rows.Err()
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	_, err = db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE relays ADD COLUMN %s %s", columnName, columnDef))
-	return err
 }
 
 func withMiddleware(next http.Handler) http.Handler {
@@ -414,11 +359,6 @@ if req.PublicPort <= 0 ||
 	if strings.TrimSpace(req.RelayID) == "" {
 		req.RelayID = newID("relay")
 	}
-	relayType, err := normalizeRelayType(req.RelayType)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 if err != nil {
@@ -433,9 +373,9 @@ if err != nil {
 	_, err = s.db.ExecContext(r.Context(), `
 		INSERT INTO relays (
 			relay_id, relay_name, public_url, region, is_online,
-			current_rooms, current_users, max_rooms, max_users, score, relay_type,
+			current_rooms, current_users, max_rooms, max_users,
 			last_heartbeat, created_at, updated_at
-		) VALUES (?, ?, ?, ?, 1, 0, 0, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, 1, 0, 0, ?, ?, ?, ?, ?)
 ON CONFLICT(public_url) DO UPDATE SET
     relay_id = excluded.relay_id,
     relay_name = excluded.relay_name,
@@ -446,11 +386,9 @@ ON CONFLICT(public_url) DO UPDATE SET
     current_users = 0,
     max_rooms = excluded.max_rooms,
     max_users = excluded.max_users,
-    score = CASE WHEN relays.score < ? THEN relays.score + ? ELSE ? END,
-    relay_type = excluded.relay_type,
     last_heartbeat = excluded.last_heartbeat,
     updated_at = excluded.updated_at
-	`, req.RelayID, req.RelayName, publicURL, normalizeRegion(req.Region), req.MaxRooms, req.MaxUsers, defaultRelayScore, relayType, now, now, now, maxRelayScore, relayScoreSuccessDelta, maxRelayScore)
+	`, req.RelayID, req.RelayName, publicURL, normalizeRegion(req.Region), req.MaxRooms, req.MaxUsers, now, now, now)
 	if err != nil {
 		writeJSONError(w, http.StatusConflict, err.Error())
 		return
@@ -461,8 +399,6 @@ ON CONFLICT(public_url) DO UPDATE SET
 		"relayName":   req.RelayName,
 		"publicUrl":   publicURL,
 		"region":      req.Region,
-		"relayType":   relayType,
-		"score":       defaultRelayScore,
 		"registeredAt": now,
 	})
 }
@@ -489,35 +425,17 @@ func (s *Server) handleRelayHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if req.IsOnline != nil && !*req.IsOnline {
 		isOnline = 0
 	}
-	relayType := ""
-	if strings.TrimSpace(req.RelayType) != "" {
-		relayType, err = normalizeRelayType(req.RelayType)
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	scoreDelta := 1
-	if isOnline == 0 {
-		scoreDelta = relayScoreOfflineDelta
-	}
 
 	res, err := s.db.ExecContext(r.Context(), `
 		UPDATE relays
 		SET current_rooms = ?,
 		    current_users = ?,
 		    is_online = ?,
-		    score = CASE
-		        WHEN score + ? > ? THEN ?
-		        WHEN score + ? < ? THEN ?
-		        ELSE score + ?
-		    END,
 		    last_heartbeat = ?,
 		    updated_at = ?,
-		    region = COALESCE(NULLIF(?, ''), region),
-		    relay_type = COALESCE(NULLIF(?, ''), relay_type)
+		    region = COALESCE(NULLIF(?, ''), region)
 		WHERE relay_id = ?
-	`, req.CurrentRooms, req.CurrentUsers, isOnline, scoreDelta, maxRelayScore, maxRelayScore, scoreDelta, minRelayScore, minRelayScore, scoreDelta, now, now, req.Region, relayType, req.RelayID)
+	`, req.CurrentRooms, req.CurrentUsers, isOnline, now, now, req.Region, req.RelayID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -542,13 +460,8 @@ func (s *Server) handleRelayChoose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	region := strings.TrimSpace(r.URL.Query().Get("region"))
-	relayType, err := normalizeOptionalRelayType(r.URL.Query().Get("relayType"))
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 
-	relay, err := s.chooseRelay(r.Context(), region, relayType)
+	relay, err := s.chooseRelay(r.Context(), region)
 	if err != nil {
 		writeJSONError(w, http.StatusNotFound, err.Error())
 		return
@@ -592,12 +505,7 @@ func (s *Server) handleRoomCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		relayType, err := normalizeOptionalRelayType(req.RelayType)
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		relay, err = s.chooseRelayTx(r.Context(), tx, strings.TrimSpace(req.Region), relayType)
+		relay, err = s.chooseRelayTx(r.Context(), tx, strings.TrimSpace(req.Region))
 		if err != nil {
 			writeJSONError(w, http.StatusNotFound, err.Error())
 			return
@@ -732,9 +640,9 @@ func (s *Server) handleRoomByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listRelays(ctx context.Context) ([]Relay, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT relay_id, relay_name, public_url, region, is_online, current_rooms, current_users, max_rooms, max_users, score, relay_type, last_heartbeat, created_at, updated_at
+		SELECT relay_id, relay_name, public_url, region, is_online, current_rooms, current_users, max_rooms, max_users, last_heartbeat, created_at, updated_at
 		FROM relays
-		ORDER BY is_online DESC, score DESC, current_users ASC, current_rooms ASC, last_heartbeat DESC, relay_id ASC
+		ORDER BY is_online DESC, current_users ASC, current_rooms ASC, last_heartbeat DESC, relay_id ASC
 	`)
 	if err != nil {
 		return nil, err
@@ -745,7 +653,7 @@ func (s *Server) listRelays(ctx context.Context) ([]Relay, error) {
 	for rows.Next() {
 		var r Relay
 		var online int
-		if err := rows.Scan(&r.RelayID, &r.RelayName, &r.PublicURL, &r.Region, &online, &r.CurrentRooms, &r.CurrentUsers, &r.MaxRooms, &r.MaxUsers, &r.Score, &r.RelayType, &r.LastHeartbeat, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.RelayID, &r.RelayName, &r.PublicURL, &r.Region, &online, &r.CurrentRooms, &r.CurrentUsers, &r.MaxRooms, &r.MaxUsers, &r.LastHeartbeat, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		r.IsOnline = online == 1
@@ -754,12 +662,12 @@ func (s *Server) listRelays(ctx context.Context) ([]Relay, error) {
 	return relays, rows.Err()
 }
 
-func (s *Server) chooseRelay(ctx context.Context, region, relayType string) (Relay, error) {
+func (s *Server) chooseRelay(ctx context.Context, region string) (Relay, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT relay_id, relay_name, public_url, region, is_online, current_rooms, current_users, max_rooms, max_users, score, relay_type, last_heartbeat, created_at, updated_at
+		SELECT relay_id, relay_name, public_url, region, is_online, current_rooms, current_users, max_rooms, max_users, last_heartbeat, created_at, updated_at
 		FROM relays
 		WHERE is_online = 1
-		ORDER BY score DESC, current_users ASC, current_rooms ASC, last_heartbeat DESC, relay_id ASC
+		ORDER BY current_users ASC, current_rooms ASC, last_heartbeat DESC, relay_id ASC
 	`)
 	if err != nil {
 		return Relay{}, err
@@ -772,7 +680,7 @@ func (s *Server) chooseRelay(ctx context.Context, region, relayType string) (Rel
 	for rows.Next() {
 		var r Relay
 		var online int
-		if err := rows.Scan(&r.RelayID, &r.RelayName, &r.PublicURL, &r.Region, &online, &r.CurrentRooms, &r.CurrentUsers, &r.MaxRooms, &r.MaxUsers, &r.Score, &r.RelayType, &r.LastHeartbeat, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.RelayID, &r.RelayName, &r.PublicURL, &r.Region, &online, &r.CurrentRooms, &r.CurrentUsers, &r.MaxRooms, &r.MaxUsers, &r.LastHeartbeat, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return Relay{}, err
 		}
 		if now-r.LastHeartbeat > int64(s.heartbeatTimeout.Seconds()) {
@@ -799,15 +707,8 @@ func (s *Server) chooseRelay(ctx context.Context, region, relayType string) (Rel
 			candidates = filtered
 		}
 	}
-	candidates = filterRelaysByType(candidates, relayType)
-	if len(candidates) == 0 {
-		return Relay{}, errors.New("no_available_relay")
-	}
 
 	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].Score != candidates[j].Score {
-			return candidates[i].Score > candidates[j].Score
-		}
 		ai := relayScore(candidates[i])
 		aj := relayScore(candidates[j])
 		if ai != aj {
@@ -825,12 +726,12 @@ func (s *Server) chooseRelay(ctx context.Context, region, relayType string) (Rel
 	return candidates[0], nil
 }
 
-func (s *Server) chooseRelayTx(ctx context.Context, tx *sql.Tx, region, relayType string) (Relay, error) {
+func (s *Server) chooseRelayTx(ctx context.Context, tx *sql.Tx, region string) (Relay, error) {
 	rows, err := tx.QueryContext(ctx, `
-		SELECT relay_id, relay_name, public_url, region, is_online, current_rooms, current_users, max_rooms, max_users, score, relay_type, last_heartbeat, created_at, updated_at
+		SELECT relay_id, relay_name, public_url, region, is_online, current_rooms, current_users, max_rooms, max_users, last_heartbeat, created_at, updated_at
 		FROM relays
 		WHERE is_online = 1
-		ORDER BY score DESC, current_users ASC, current_rooms ASC, last_heartbeat DESC, relay_id ASC
+		ORDER BY current_users ASC, current_rooms ASC, last_heartbeat DESC, relay_id ASC
 	`)
 	if err != nil {
 		return Relay{}, err
@@ -843,7 +744,7 @@ func (s *Server) chooseRelayTx(ctx context.Context, tx *sql.Tx, region, relayTyp
 	for rows.Next() {
 		var r Relay
 		var online int
-		if err := rows.Scan(&r.RelayID, &r.RelayName, &r.PublicURL, &r.Region, &online, &r.CurrentRooms, &r.CurrentUsers, &r.MaxRooms, &r.MaxUsers, &r.Score, &r.RelayType, &r.LastHeartbeat, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.RelayID, &r.RelayName, &r.PublicURL, &r.Region, &online, &r.CurrentRooms, &r.CurrentUsers, &r.MaxRooms, &r.MaxUsers, &r.LastHeartbeat, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return Relay{}, err
 		}
 		if now-r.LastHeartbeat > int64(s.heartbeatTimeout.Seconds()) {
@@ -870,15 +771,8 @@ func (s *Server) chooseRelayTx(ctx context.Context, tx *sql.Tx, region, relayTyp
 			candidates = filtered
 		}
 	}
-	candidates = filterRelaysByType(candidates, relayType)
-	if len(candidates) == 0 {
-		return Relay{}, errors.New("no_available_relay")
-	}
 
 	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].Score != candidates[j].Score {
-			return candidates[i].Score > candidates[j].Score
-		}
 		return relayScore(candidates[i]) < relayScore(candidates[j])
 	})
 
