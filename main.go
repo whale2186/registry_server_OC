@@ -17,7 +17,6 @@
 package main
 
 import (
-	"net"
 	"context"
 	"bytes"
 	"crypto/rand"
@@ -86,6 +85,7 @@ type registerRelayRequest struct {
     RelayID    string `json:"relayId"`
     RelayName  string `json:"relayName"`
     PublicPort int    `json:"publicPort"`
+	PublicURL  string `json:"publicUrl"`
     Region     string `json:"region"`
     MaxRooms   int    `json:"maxRooms"`
     MaxUsers   int    `json:"maxUsers"`
@@ -370,7 +370,7 @@ if req.PublicPort <= 0 ||
 	publicURL := strings.TrimSpace(req.PublicURL)
 	now := time.Now().UTC().Unix()
 
-	_, err = s.db.ExecContext(r.Context(), `
+	_, err := s.db.ExecContext(r.Context(), `
 		INSERT INTO relays (
 			relay_id, relay_name, public_url, region, is_online,
 			current_rooms, current_users, max_rooms, max_users,
