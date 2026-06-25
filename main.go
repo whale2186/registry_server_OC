@@ -201,7 +201,7 @@ func (s *Server) handleRoomCheckRelay(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	var (
-		addr      = flag.String("addr", ":8080", "HTTP listen address")
+		addr      = flag.String("addr", ":80", "HTTP listen address")
 		dbPath    = flag.String("db", "registry.db", "SQLite database file")
 		heartbeat = flag.Duration("heartbeat-timeout", defaultHeartbeatTimeout, "relay heartbeat timeout")
 	)
