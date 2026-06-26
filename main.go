@@ -601,37 +601,93 @@ if err != nil {
 func (s *Server) handleRoomByID(w http.ResponseWriter, r *http.Request) {
 	roomID := strings.TrimPrefix(r.URL.Path, "/api/room/")
 	roomID = strings.TrimSpace(roomID)
+
 	if roomID == "" || strings.Contains(roomID, "/") {
 		writeJSONError(w, http.StatusBadRequest, "room_id_required")
 		return
 	}
 
 	switch r.Method {
+
 	case http.MethodGet:
+
 		room, relay, err := s.getRoomWithRelay(r.Context(), roomID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				writeJSONError(w, http.StatusNotFound, "room_not_found")
-				return
+			} else {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
 			}
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+
+		// Ensure the room exists on the assigned relay.
+		err = registerRoomOnRelay(
+			relay.PublicURL,
+			room.RoomID,
+			room.PinHash,
+			room.MaxUsers,
+		)
+
+		if err != nil {
+
+			// Assigned relay is unavailable. Pick another relay.
+			newRelay, err := s.chooseRelay(r.Context(), relay.Region)
+			if err != nil {
+				writeJSONError(w, http.StatusServiceUnavailable, "no_available_relay")
+				return
+			}
+
+			// Register room on the new relay.
+			if err := registerRoomOnRelay(
+				newRelay.PublicURL,
+				room.RoomID,
+				room.PinHash,
+				room.MaxUsers,
+			); err != nil {
+				writeJSONError(w, http.StatusBadGateway, "relay_room_registration_failed")
+				return
+			}
+
+			// Update room ownership.
+			_, err = s.db.ExecContext(
+				r.Context(),
+				`UPDATE rooms
+				 SET relay_id = ?, updated_at = ?
+				 WHERE room_id = ?`,
+				newRelay.RelayID,
+				time.Now().UTC().Unix(),
+				room.RoomID,
+			)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+
+			room.RelayID = newRelay.RelayID
+			relay = newRelay
+		}
+
 		writeJSON(w, http.StatusOK, map[string]any{
 			"room":  room,
 			"relay": relay,
 		})
 
 	case http.MethodDelete:
+
 		if err := s.deleteRoom(r.Context(), roomID); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				writeJSONError(w, http.StatusNotFound, "room_not_found")
-				return
+			} else {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
 			}
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "roomId": roomID})
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"roomId": roomID,
+		})
 
 	default:
 		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed")
