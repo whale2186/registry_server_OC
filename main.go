@@ -43,7 +43,7 @@ import (
 
 const (
 	defaultHeartbeatTimeout = 60 * time.Second
-	defaultRoomMaxUsers     = 4
+	defaultRoomMaxUsers     = 9999
 )
 
 type Server struct {
