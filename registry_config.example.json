@@ -1,0 +1,10 @@
+{
+  "addr": ":8080",
+  "storageBackend": "sqlite",
+  "dbPath": "registry.db",
+  "heartbeatTimeoutSeconds": 60,
+  "mongoUri": "",
+  "mongoDatabase": "openchat_registry",
+  "mongoRelaysCollection": "relays",
+  "mongoRoomsCollection": "rooms"
+}
