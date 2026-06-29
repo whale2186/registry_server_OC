@@ -156,6 +156,7 @@ type createRoomRequest struct {
 	RelayID                string `json:"relayId,omitempty"`
 	Region                 string `json:"region,omitempty"`
 	Pin                    string `json:"pin,omitempty"`
+	PinHash                string `json:"pinHash,omitempty"`
 	MaxUsers               int    `json:"maxUsers"`
 	OfflineMessagesEnabled bool   `json:"offlineMessagesEnabled"`
 }
@@ -1325,7 +1326,14 @@ func (s *Server) handleRoomCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC().Unix()
 	pinHash := ""
-	if strings.TrimSpace(req.Pin) != "" {
+	if strings.TrimSpace(req.PinHash) != "" {
+		var ok bool
+		pinHash, ok = normalizePinHash(req.PinHash)
+		if !ok {
+			writeJSONError(w, http.StatusBadRequest, "invalid_pin_hash")
+			return
+		}
+	} else if strings.TrimSpace(req.Pin) != "" {
 		pinHash = hashPin(req.Pin)
 	}
 
@@ -1587,6 +1595,20 @@ func newID(prefix string) string {
 func hashPin(pin string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(pin)))
 	return hex.EncodeToString(sum[:])
+}
+
+func normalizePinHash(pinHash string) (string, bool) {
+	pinHash = strings.ToLower(strings.TrimSpace(pinHash))
+	if pinHash == "" {
+		return "", true
+	}
+	if len(pinHash) != sha256.Size*2 {
+		return "", false
+	}
+	if _, err := hex.DecodeString(pinHash); err != nil {
+		return "", false
+	}
+	return pinHash, true
 }
 
 func registerRoomOnRelay(
